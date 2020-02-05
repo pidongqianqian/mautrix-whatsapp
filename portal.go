@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"encoding/gob"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"html"
 	"image"
@@ -791,6 +792,10 @@ func (portal *Portal) CreateMatrixRoom(user *User) error {
 		}
 	}
 	user.addPortalToCommunity(portal)
+	if portal.IsPrivateChat() {
+		puppet := user.bridge.GetPuppetByJID(portal.Key.JID)
+		user.addPuppetToCommunity(puppet)
+	}
 	err = portal.FillInitialHistory(user)
 	if err != nil {
 		portal.log.Errorln("Failed to fill history:", err)
@@ -908,6 +913,27 @@ type MessageContent struct {
 	IsCustomPuppet bool `json:"net.maunium.whatsapp.puppet,omitempty"`
 }
 
+type serializableContent mautrix.Content
+
+type serializableMessageContent struct {
+	*serializableContent
+	IsCustomPuppet bool `json:"net.maunium.whatsapp.puppet,omitempty"`
+}
+
+// Hacky bypass for mautrix.Content's MarshalSJSON
+func (content *MessageContent) MarshalJSON() ([]byte, error) {
+	if mautrix.DisableFancyEventParsing {
+		if content.IsCustomPuppet {
+			content.Raw["net.maunium.whatsapp.puppet"] = content.IsCustomPuppet
+		}
+		return json.Marshal(content.Raw)
+	}
+	return json.Marshal(&serializableMessageContent{
+		serializableContent: (*serializableContent)(content.Content),
+		IsCustomPuppet:      content.IsCustomPuppet,
+	})
+}
+
 func (portal *Portal) HandleTextMessage(source *User, message whatsapp.TextMessage) {
 	if !portal.startHandling(message.Info) {
 		return
@@ -946,7 +972,10 @@ func (portal *Portal) HandleMediaMessage(source *User, download func() ([]byte, 
 	}
 
 	data, err := download()
-	if err != nil {
+	if err == whatsapp.ErrNoURLPresent {
+		portal.log.Debugln("No URL present error for media message %s, ignoring...", info.Id)
+		return
+	} else if err != nil {
 		portal.log.Errorfln("Failed to download media for %s: %v", info.Id, err)
 		resp, err := portal.MainIntent().SendNotice(portal.MXID, "Failed to bridge media")
 		if err != nil {
@@ -955,11 +984,6 @@ func (portal *Portal) HandleMediaMessage(source *User, download func() ([]byte, 
 			portal.finishHandling(source, info.Source, resp.EventID)
 		}
 		return
-	}
-
-	// WhatsApp sends incorrect mime types 3:<
-	if detected := http.DetectContentType(data); detected != "application/octet-stream" {
-		mimeType = detected
 	}
 
 	// synapse doesn't handle webp well, so we convert it. This can be dropped once https://github.com/matrix-org/synapse/issues/4382 is fixed
@@ -1177,7 +1201,7 @@ func (portal *Portal) addRelaybotFormat(user *User, evt *mautrix.Event) bool {
 	}
 
 	if evt.Content.Format != mautrix.FormatHTML {
-		evt.Content.FormattedBody = strings.ReplaceAll(html.EscapeString(evt.Content.Body), "\n", "<br/>")
+		evt.Content.FormattedBody = strings.Replace(html.EscapeString(evt.Content.Body), "\n", "<br/>", -1)
 		evt.Content.Format = mautrix.FormatHTML
 	}
 	data, err := portal.bridge.Config.Bridge.Relaybot.FormatMessage(evt, member)
@@ -1233,6 +1257,9 @@ func (portal *Portal) HandleMatrixMessage(sender *User, evt *mautrix.Event) {
 			relaybotFormatted = portal.addRelaybotFormat(sender, evt)
 			sender = portal.bridge.Relaybot
 		}
+	}
+	if evt.Type == mautrix.EventSticker {
+		evt.Content.MsgType = mautrix.MsgImage
 	}
 	var err error
 	switch evt.Content.MsgType {

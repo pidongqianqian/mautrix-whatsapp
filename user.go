@@ -365,9 +365,34 @@ func (user *User) PostLogin() {
 	go user.intPostLogin()
 }
 
+func (user *User) tryAutomaticDoublePuppeting() {
+	if len(user.bridge.Config.Bridge.LoginSharedSecret) == 0 || !strings.HasSuffix(user.MXID, user.bridge.Config.Homeserver.Domain) {
+		// Automatic login not enabled or user is on another homeserver
+		return
+	}
+
+	puppet := user.bridge.GetPuppetByJID(user.JID)
+	if len(puppet.CustomMXID) > 0 {
+		// Custom puppet already enabled
+		return
+	}
+	accessToken, err := puppet.loginWithSharedSecret(user.MXID)
+	if err != nil {
+		user.log.Warnln("Failed to login with shared secret:", err)
+		return
+	}
+	err = puppet.SwitchCustomMXID(accessToken, user.MXID)
+	if err != nil {
+		puppet.log.Warnln("Failed to switch to auto-logined custom puppet:", err)
+		return
+	}
+	user.log.Infoln("Successfully automatically enabled custom puppet")
+}
+
 func (user *User) intPostLogin() {
-	user.createCommunity()
 	defer user.syncLock.Unlock()
+	user.createCommunity()
+	user.tryAutomaticDoublePuppeting()
 
 	select {
 	case <-user.chatListReceived:
@@ -424,6 +449,10 @@ func (user *User) syncPortals(chatMap map[string]whatsapp.Chat, createAll bool) 
 		var inCommunity, ok bool
 		if inCommunity, ok = existingKeys[portal.Key]; !ok || !inCommunity {
 			inCommunity = user.addPortalToCommunity(portal)
+			if portal.IsPrivateChat() {
+				puppet := user.bridge.GetPuppetByJID(portal.Key.JID)
+				user.addPuppetToCommunity(puppet)
+			}
 		}
 		portalKeys = append(portalKeys, database.PortalKeyWithMeta{PortalKey: portal.Key, InCommunity: inCommunity})
 	}
@@ -604,6 +633,10 @@ func (user *User) HandleTextMessage(message whatsapp.TextMessage) {
 }
 
 func (user *User) HandleImageMessage(message whatsapp.ImageMessage) {
+	user.putMessage(PortalMessage{message.Info.RemoteJid, user, message, message.Info.Timestamp})
+}
+
+func (user *User) HandleStickerMessage(message whatsapp.StickerMessage) {
 	user.putMessage(PortalMessage{message.Info.RemoteJid, user, message, message.Info.Timestamp})
 }
 

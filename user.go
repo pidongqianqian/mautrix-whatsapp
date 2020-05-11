@@ -655,6 +655,14 @@ func (user *User) HandleMessageRevoke(message whatsappExt.MessageRevocation) {
 	user.putMessage(PortalMessage{message.RemoteJid, user, message, 0})
 }
 
+func (user *User) HandleContactMessage(message whatsapp.ContactMessage) {
+	user.putMessage(PortalMessage{message.Info.RemoteJid, user, message, message.Info.Timestamp})
+}
+
+func (user *User) HandleLocationMessage(message whatsapp.LocationMessage) {
+	user.putMessage(PortalMessage{message.Info.RemoteJid, user, message, message.Info.Timestamp})
+}
+
 type FakeMessage struct {
 	Text string
 	ID   string
@@ -704,9 +712,8 @@ func (user *User) HandlePresence(info whatsappExt.Presence) {
 			_, _ = puppet.IntentFor(portal).UserTyping(puppet.typingIn, false, 0)
 			puppet.typingIn = ""
 			puppet.typingAt = 0
-		} else {
-			_ = puppet.DefaultIntent().SetPresence("online")
 		}
+		_ = puppet.DefaultIntent().SetPresence("online")
 	case whatsapp.PresenceComposing:
 		portal := user.GetPortalByJID(info.JID)
 		if len(puppet.typingIn) > 0 && puppet.typingAt+15 > time.Now().Unix() {
@@ -718,6 +725,7 @@ func (user *User) HandlePresence(info whatsappExt.Presence) {
 		puppet.typingIn = portal.MXID
 		puppet.typingAt = time.Now().Unix()
 		_, _ = puppet.IntentFor(portal).UserTyping(portal.MXID, true, 15*1000)
+		_ = puppet.DefaultIntent().SetPresence("online")
 	}
 }
 
